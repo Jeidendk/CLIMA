@@ -63,88 +63,90 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
         weather_data['minutosDesdeActualizacion'] = 0
         weather_data['estadoDato'] = "EN TIEMPO REAL"
 
-    # --- ESTRATEGIA 1: Extraer de 'dataLayer' (Fuente más confiable de visualización) ---
-    # dataLayer = [{ 'currentTemperature':'17ºC', ... }];
-    data_layer_match = re.search(r'dataLayer\s*=\s*\[(\{.*?\})\];', str(soup), re.DOTALL)
-    dl_found = False
-    
-    if data_layer_match:
+    # --- ESTRATEGIA 1: Extraer del JSON sticky banner (MÁS COMPLETO) ---
+    sticky_banner = soup.find('div', id='sticky-banner')
+    if sticky_banner and sticky_banner.has_attr('data-key-values'):
         try:
-            # Es JS, no JSON estricto (comillas simples). Usamos regex para sacar campos.
-            dl_text = data_layer_match.group(1)
+            json_data = json.loads(sticky_banner['data-key-values'])
             
-            # Temperatura
-            temp_m = re.search(r"'currentTemperature'\s*:\s*'([^']*)'", dl_text)
-            if temp_m: 
-                weather_data['temperatura'] = temp_m.group(1).replace('ºC', '°').replace('C', '')
-                dl_found = True
-            
-            # Ubicación (intentar sacar de provincia/ciudad)
-            prov_m = re.search(r"'province'\s*:\s*'([^']*)'", dl_text)
-            city_m = re.search(r"'productCity'\s*:\s*'([^']*)'", dl_text) # ej: ecuador/chimborazo/riobamba
-            
-            if city_m:
-                parts = city_m.group(1).split('/')
+            # Ubicación: desde urlized
+            if 'urlized' in json_data:
+                parts = json_data['urlized'].split('/')
                 if len(parts) >= 3:
                      city = parts[2].replace('-', ' ').upper()
                      prov = parts[1].replace('-', ' ').upper()
                      weather_data['ubicacion'] = f"{city}, {prov}"
             
+            # Temperatura
+            if 'temp_c' in json_data: 
+                weather_data['temperatura'] = f"{json_data['temp_c']}°"
+            
+            # Humedad, Presión, UV (CLAVES: estos SÍ están en data-key-values)
+            if 'humidity' in json_data: 
+                weather_data['humedad'] = f"{json_data['humidity']}%"
+            
+            if 'pressure' in json_data: 
+                weather_data['presion'] = f"{json_data['pressure']} hPa"
+            
+            if 'uv_radiation' in json_data: 
+                weather_data['radiacionUv'] = str(json_data['uv_radiation'])
+            
+            # Viento
+            if 'wind_speed' in json_data: 
+                weather_data['viento'] = f"{json_data['wind_speed']} km/h"
+            
             # Descripción
-            desc_m = re.search(r"'weatherForecast'\s*:\s*'([^']*)'", dl_text)
-            if desc_m:
-                raw_desc = desc_m.group(1)
-                # Mapeo simple
-                desc_map = {
-                    'Cloudy': 'Nublado', 'Partly cloudy': 'Parcialmente nublado',
-                    'Sunny': 'Soleado', 'Clear': 'Despejado', 'Rain': 'Lluvia'
-                }
-                weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc)
-                
-            # Otros datos del dataLayer
-            hum_m = re.search(r"'humidity'\s*:\s*'([^']*)'", dl_text)
-            if hum_m: weather_data['humedad'] = f"{hum_m.group(1)}%"
+            desc_map = {
+                'cloudy': 'Nublado',
+                'partly_cloudy': 'Parcialmente nublado',
+                'sunny': 'Soleado',
+                'clear': 'Despejado',
+                'rain': 'Lluvia'
+            }
+            raw_desc = json_data.get('clouds_level', '') or json_data.get('precip_type', '')
+            if raw_desc:
+                weather_data['descripcion'] = desc_map.get(raw_desc.lower(), raw_desc.capitalize())
+            
+        except Exception as e:
+            print(f"Error parseando sticky-banner JSON: {e}")
 
-            wind_m = re.search(r"'windSpeed'\s*:\s*'([^']*)'", dl_text)
-            if wind_m: weather_data['viento'] = wind_m.group(1)
+    # --- ESTRATEGIA 2: Extraer de 'dataLayer' (Fallback) ---
+    data_layer_match = re.search(r'dataLayer\s*=\s*\[(\{.*?\})\];', str(soup), re.DOTALL)
+    
+    if data_layer_match:
+        try:
+            dl_text = data_layer_match.group(1)
             
-            press_m = re.search(r"'pressure'\s*:\s*'([^']*)'", dl_text)
-            if press_m: weather_data['presion'] = f"{press_m.group(1)} hPa"
+            # Solo extraer si no tenemos ya
+            if 'temperatura' not in weather_data:
+                temp_m = re.search(r"'currentTemperature'\s*:\s*'([^']*)'", dl_text)
+                if temp_m: 
+                    weather_data['temperatura'] = temp_m.group(1).replace('ºC', '°').replace('C', '')
             
-            uv_m = re.search(r"'uv_radiation'\s*:\s*'([^']*)'", dl_text)
-            if uv_m: weather_data['radiacionUv'] = uv_m.group(1)
+            if 'viento' not in weather_data:
+                wind_m = re.search(r"'windSpeed'\s*:\s*'([^']*)'", dl_text)
+                if wind_m: weather_data['viento'] = wind_m.group(1)
             
-            # Probabilidad de precipitación (puede dar pista sobre nubes)
-            precip_m = re.search(r"'precipitationProbability'\s*:\s*'([^']*)'", dl_text)
-            if precip_m: 
-                precip_val = precip_m.group(1)
-                # Si es alta probabilidad, asumir mucha cobertura de nubes
-                try:
-                    if int(precip_val) > 70:
-                        weather_data['nubes'] = f"{precip_val}%"
-                except:
-                    pass
+            if 'descripcion' not in weather_data:
+                desc_m = re.search(r"'weatherForecast'\s*:\s*'([^']*)'", dl_text)
+                if desc_m:
+                    raw_desc = desc_m.group(1)
+                    desc_map = {
+                        'Cloudy': 'Nublado', 'Partly cloudy': 'Parcialmente nublado',
+                        'Sunny': 'Soleado', 'Clear': 'Despejado', 'Rain': 'Lluvia'
+                    }
+                    weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc)
 
         except Exception as e:
             print(f"Error parseando dataLayer: {e}")
 
-    # --- ESTRATEGIA 2: Extraer del JSON sticky banner (Fallback) ---
-    sticky_banner = soup.find('div', id='sticky-banner')
-    if sticky_banner and sticky_banner.has_attr('data-key-values') and not weather_data.get('temperatura'):
-        try:
-            json_data = json.loads(sticky_banner['data-key-values'])
-            # ... (código existente simplificado)
-            if 'temp_c' in json_data: weather_data['temperatura'] = f"{json_data['temp_c']}°"
-            # ... Resto de campos solo si no están ya
-        except:
-             pass
-
     # --- ESTRATEGIA 3: Scraping de Texto (Nubes, Sensación, arreglos finales) ---
     full_text = soup.get_text(separator=' ', strip=True)
 
-    # Sensación Térmica
+    # Sensación Térmica (MEJORADO: evitar capturar año)
     if 'sensacion' not in weather_data:
-        sensacion_match = re.search(r'(?:Sensación|Feels like).*?(\d+)', full_text, re.IGNORECASE)
+        # Buscar específicamente después de "Sensación" y antes de cualquier letra
+        sensacion_match = re.search(r'Sensación[^\d]*?(\d{1,2})°', full_text, re.IGNORECASE)
         if sensacion_match:
             weather_data['sensacion'] = f"{sensacion_match.group(1)}°"
         elif 'temperatura' in weather_data:
@@ -157,6 +159,30 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
             weather_data['nubes'] = f"{nubes_match.group(1)}%"
         else:
             weather_data['nubes'] = '--%'
+    
+    # Humedad (fallback texto si no está en dataLayer)
+    if 'humedad' not in weather_data:
+        hum_match = re.search(r'Humedad[^\d]*?(\d{1,3})\s*%', full_text, re.IGNORECASE)
+        if hum_match:
+            weather_data['humedad'] = f"{hum_match.group(1)}%"
+        else:
+            weather_data['humedad'] = '--%'
+    
+    # Presión (fallback texto)
+    if 'presion' not in weather_data:
+        pres_match = re.search(r'Presión[^\d]*?(\d{3,4})\s*(?:hPa|mb)', full_text, re.IGNORECASE)
+        if pres_match:
+            weather_data['presion'] = f"{pres_match.group(1)} hPa"
+        else:
+            weather_data['presion'] = '--'
+    
+    # Radiación UV (fallback texto)
+    if 'radiacionUv' not in weather_data:
+        uv_match = re.search(r'(?:UV|Radiación UV)[^\d]*?(\d{1,2})', full_text, re.IGNORECASE)
+        if uv_match:
+            weather_data['radiacionUv'] = uv_match.group(1)
+        else:
+            weather_data['radiacionUv'] = '--'
             
     # Garantizar ubicación mayúsculas
     if 'ubicacion' not in weather_data:
