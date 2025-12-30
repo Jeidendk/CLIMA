@@ -22,6 +22,9 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
     weather_data['fechaActualizacion'] = now.strftime('%d/%m/%Y')
     weather_data['timestamp'] = int(now_utc.timestamp())
     
+    # CRÍTICO: Inicializar BeautifulSoup
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
     # --- ESTRATEGIA: Obtener hora REAL de actualización del sitio ---
     # Buscar "Actualizado 10:46" para mostrar la hora real del dato, no del fetch
     hora_real_str = now.strftime('%H:%M')
@@ -99,13 +102,28 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
                 weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc)
                 
             # Otros datos del dataLayer
-            if 'humidity' not in weather_data:
-                 hum_m = re.search(r"'humidity'\s*:\s*'([^']*)'", dl_text)
-                 if hum_m: weather_data['humedad'] = f"{hum_m.group(1)}%"
+            hum_m = re.search(r"'humidity'\s*:\s*'([^']*)'", dl_text)
+            if hum_m: weather_data['humedad'] = f"{hum_m.group(1)}%"
 
-            if 'viento' not in weather_data:
-                 wind_m = re.search(r"'windSpeed'\s*:\s*'([^']*)'", dl_text)
-                 if wind_m: weather_data['viento'] = wind_m.group(1)
+            wind_m = re.search(r"'windSpeed'\s*:\s*'([^']*)'", dl_text)
+            if wind_m: weather_data['viento'] = wind_m.group(1)
+            
+            press_m = re.search(r"'pressure'\s*:\s*'([^']*)'", dl_text)
+            if press_m: weather_data['presion'] = f"{press_m.group(1)} hPa"
+            
+            uv_m = re.search(r"'uv_radiation'\s*:\s*'([^']*)'", dl_text)
+            if uv_m: weather_data['radiacionUv'] = uv_m.group(1)
+            
+            # Probabilidad de precipitación (puede dar pista sobre nubes)
+            precip_m = re.search(r"'precipitationProbability'\s*:\s*'([^']*)'", dl_text)
+            if precip_m: 
+                precip_val = precip_m.group(1)
+                # Si es alta probabilidad, asumir mucha cobertura de nubes
+                try:
+                    if int(precip_val) > 70:
+                        weather_data['nubes'] = f"{precip_val}%"
+                except:
+                    pass
 
         except Exception as e:
             print(f"Error parseando dataLayer: {e}")
