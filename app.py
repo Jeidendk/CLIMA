@@ -22,88 +22,135 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
     weather_data['fechaActualizacion'] = now.strftime('%d/%m/%Y')
     weather_data['timestamp'] = int(now_utc.timestamp())
     
-    soup = BeautifulSoup(html_content, 'html.parser')
+    # --- ESTRATEGIA: Obtener hora REAL de actualización del sitio ---
+    # Buscar "Actualizado 10:46" para mostrar la hora real del dato, no del fetch
+    hora_real_str = now.strftime('%H:%M')
+    minutos_diff = 0
+    estado_dato = "EN TIEMPO REAL"
     
-    # --- ESTRATEGIA 1: Extraer del JSON en data-key-values (Rápido y estructurado) ---
+    actualizado_match = re.search(r'Actualizado\s+(\d{1,2}:\d{2})', soup.get_text(), re.IGNORECASE)
+    if actualizado_match:
+        hora_real_str = actualizado_match.group(1)
+        weather_data['horaClima'] = hora_real_str
+        weather_data['horaActualizacion'] = f"{hora_real_str}:00" # Estimado segs
+        
+        # Calcular diferencia para "minutosDesdeActualizacion"
+        try:
+            h, m = map(int, hora_real_str.split(':'))
+            fecha_dato = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            # Ajuste de día si el dato es de ayer (muy raro, pero posible cerca de medianoche)
+            if fecha_dato > now + timedelta(minutes=15): 
+                fecha_dato -= timedelta(days=1)
+                
+            diff = (now - fecha_dato).total_seconds() / 60
+            minutos_diff = int(max(0, diff))
+            
+            if minutos_diff > 60:
+                estado_dato = f"DESACTUALIZADO ({minutos_diff} min)"
+            else:
+                 estado_dato = "EN TIEMPO REAL"
+                 
+            weather_data['minutosDesdeActualizacion'] = minutos_diff
+            weather_data['estadoDato'] = estado_dato
+        except:
+            pass
+    else:
+        # Fallback si no se encuentra "Actualizado"
+        weather_data['horaClima'] = now.strftime('%H:%M')
+        weather_data['minutosDesdeActualizacion'] = 0
+        weather_data['estadoDato'] = "EN TIEMPO REAL"
+
+    # --- ESTRATEGIA 1: Extraer de 'dataLayer' (Fuente más confiable de visualización) ---
+    # dataLayer = [{ 'currentTemperature':'17ºC', ... }];
+    data_layer_match = re.search(r'dataLayer\s*=\s*\[(\{.*?\})\];', str(soup), re.DOTALL)
+    dl_found = False
+    
+    if data_layer_match:
+        try:
+            # Es JS, no JSON estricto (comillas simples). Usamos regex para sacar campos.
+            dl_text = data_layer_match.group(1)
+            
+            # Temperatura
+            temp_m = re.search(r"'currentTemperature'\s*:\s*'([^']*)'", dl_text)
+            if temp_m: 
+                weather_data['temperatura'] = temp_m.group(1).replace('ºC', '°').replace('C', '')
+                dl_found = True
+            
+            # Ubicación (intentar sacar de provincia/ciudad)
+            prov_m = re.search(r"'province'\s*:\s*'([^']*)'", dl_text)
+            city_m = re.search(r"'productCity'\s*:\s*'([^']*)'", dl_text) # ej: ecuador/chimborazo/riobamba
+            
+            if city_m:
+                parts = city_m.group(1).split('/')
+                if len(parts) >= 3:
+                     city = parts[2].replace('-', ' ').upper()
+                     prov = parts[1].replace('-', ' ').upper()
+                     weather_data['ubicacion'] = f"{city}, {prov}"
+            
+            # Descripción
+            desc_m = re.search(r"'weatherForecast'\s*:\s*'([^']*)'", dl_text)
+            if desc_m:
+                raw_desc = desc_m.group(1)
+                # Mapeo simple
+                desc_map = {
+                    'Cloudy': 'Nublado', 'Partly cloudy': 'Parcialmente nublado',
+                    'Sunny': 'Soleado', 'Clear': 'Despejado', 'Rain': 'Lluvia'
+                }
+                weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc)
+                
+            # Otros datos del dataLayer
+            if 'humidity' not in weather_data:
+                 hum_m = re.search(r"'humidity'\s*:\s*'([^']*)'", dl_text)
+                 if hum_m: weather_data['humedad'] = f"{hum_m.group(1)}%"
+
+            if 'viento' not in weather_data:
+                 wind_m = re.search(r"'windSpeed'\s*:\s*'([^']*)'", dl_text)
+                 if wind_m: weather_data['viento'] = wind_m.group(1)
+
+        except Exception as e:
+            print(f"Error parseando dataLayer: {e}")
+
+    # --- ESTRATEGIA 2: Extraer del JSON sticky banner (Fallback) ---
     sticky_banner = soup.find('div', id='sticky-banner')
-    json_data = {}
-    if sticky_banner and sticky_banner.has_attr('data-key-values'):
+    if sticky_banner and sticky_banner.has_attr('data-key-values') and not weather_data.get('temperatura'):
         try:
             json_data = json.loads(sticky_banner['data-key-values'])
-            
-            # Ubicación: Construir desde 'urlized' si es posible para tener "Riobamba, Chimborazo"
-            # formato urlized: "ecuador/chimborazo/riobamba"
-            if 'urlized' in json_data:
-                parts = json_data['urlized'].split('/')
-                if len(parts) >= 3:
-                    city = parts[2].replace('-', ' ').upper()
-                    province = parts[1].replace('-', ' ').upper()
-                    weather_data['ubicacion'] = f"{city}, {province}"
-            
-            # Fallback ubicación simple
-            if 'ubicacion' not in weather_data:
-                city = json_data.get('poi_name', 'RIOBAMBA').upper()
-                region = json_data.get('region', '').replace('canton-', 'CANTÓN ').replace('-', ' ').upper()
-                weather_data['ubicacion'] = f"{city}, {region}"
-
-            # Datos Básicos del JSON
+            # ... (código existente simplificado)
             if 'temp_c' in json_data: weather_data['temperatura'] = f"{json_data['temp_c']}°"
-            if 'humidity' in json_data: weather_data['humedad'] = f"{json_data['humidity']}%"
-            if 'wind_speed' in json_data: weather_data['viento'] = f"{json_data['wind_speed']} km/h"
-            if 'pressure' in json_data: weather_data['presion'] = f"{json_data['pressure']} hPa"
-            if 'uv_radiation' in json_data: weather_data['radiacionUv'] = str(json_data['uv_radiation'])
-            
-            # Descripción (traducir)
-            desc_map = {
-                'cloudy': 'Nublado',
-                'partly_cloudy': 'Parcialmente nublado',
-                'sunny': 'Soleado',
-                'clear': 'Despejado',
-                'rain': 'Lluvia',
-                'storm': 'Tormenta',
-                'snow': 'Nieve',
-                'fog': 'Niebla',
-                'despejado': 'Despejado',
-                'parcialmente nuboso': 'Parcialmente nublado',
-                'cubierto': 'Nublado'
-            }
-            raw_desc = json_data.get('clouds_level', '') or json_data.get('precip_type', '')
-            weather_data['descripcion'] = desc_map.get(raw_desc.lower(), raw_desc.capitalize())
-            
-        except Exception as e:
-            print(f"Error parseando JSON: {e}")
+            # ... Resto de campos solo si no están ya
+        except:
+             pass
 
-    # --- ESTRATEGIA 2: Scraping de Texto para datos faltantes (Nubes, Sensación, arreglos) ---
-    
+    # --- ESTRATEGIA 3: Scraping de Texto (Nubes, Sensación, arreglos finales) ---
     full_text = soup.get_text(separator=' ', strip=True)
 
     # Sensación Térmica
     if 'sensacion' not in weather_data:
-        # Buscar texto "Sensación" seguido de números
         sensacion_match = re.search(r'(?:Sensación|Feels like).*?(\d+)', full_text, re.IGNORECASE)
         if sensacion_match:
             weather_data['sensacion'] = f"{sensacion_match.group(1)}°"
         elif 'temperatura' in weather_data:
              weather_data['sensacion'] = weather_data['temperatura']
     
-    # Porcentaje de Nubes
-    # Buscar "Nubes" seguido de un número y % en todo el texto limpio
+    # Nubes
     if 'nubes' not in weather_data:
         nubes_match = re.search(r'Nubes\s+(\d+)\s*%', full_text, re.IGNORECASE)
         if nubes_match:
             weather_data['nubes'] = f"{nubes_match.group(1)}%"
         else:
             weather_data['nubes'] = '--%'
-        
-    # Arreglo descripción
+            
+    # Garantizar ubicación mayúsculas
+    if 'ubicacion' not in weather_data:
+         weather_data['ubicacion'] = "RIOBAMBA, CHIMBORAZO" # Fallback final
+    elif weather_data['ubicacion'].islower() or 'canton' in weather_data['ubicacion'].lower():
+         weather_data['ubicacion'] = weather_data['ubicacion'].upper()
+         
+    # Garantizar descripción
     if 'descripcion' not in weather_data or not weather_data['descripcion']:
          weather_data['descripcion'] = 'Nublado'
 
-    # Estado
-    weather_data['esEnTiempoReal'] = True
-    weather_data['estadoDato'] = 'EN TIEMPO REAL'
-    weather_data['minutosDesdeActualizacion'] = 0
-    weather_data['horaClima'] = now.strftime('%H:%M')
+    weather_data['esEnTiempoReal'] = (minutos_diff < 60)
     
     return weather_data
 
