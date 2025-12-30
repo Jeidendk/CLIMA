@@ -36,14 +36,14 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
             if 'urlized' in json_data:
                 parts = json_data['urlized'].split('/')
                 if len(parts) >= 3:
-                    city = parts[2].replace('-', ' ').title()
-                    province = parts[1].replace('-', ' ').title()
+                    city = parts[2].replace('-', ' ').upper()
+                    province = parts[1].replace('-', ' ').upper()
                     weather_data['ubicacion'] = f"{city}, {province}"
             
             # Fallback ubicación simple
             if 'ubicacion' not in weather_data:
-                city = json_data.get('poi_name', 'Riobamba')
-                region = json_data.get('region', '').replace('canton-', 'Cantón ').title()
+                city = json_data.get('poi_name', 'RIOBAMBA').upper()
+                region = json_data.get('region', '').replace('canton-', 'CANTÓN ').replace('-', ' ').upper()
                 weather_data['ubicacion'] = f"{city}, {region}"
 
             # Datos Básicos del JSON
