@@ -75,26 +75,29 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
 
     # --- ESTRATEGIA 2: Scraping de Texto para datos faltantes (Nubes, Sensación, arreglos) ---
     
-    # Sensación Térmica (A veces no está en el JSON)
+    full_text = soup.get_text(separator=' ', strip=True)
+
+    # Sensación Térmica
     if 'sensacion' not in weather_data:
         # Buscar texto "Sensación" seguido de números
-        sensacion_match = re.search(r'(?:Sensación|Feels like).*?(\d+)', soup.get_text(), re.IGNORECASE)
+        sensacion_match = re.search(r'(?:Sensación|Feels like).*?(\d+)', full_text, re.IGNORECASE)
         if sensacion_match:
             weather_data['sensacion'] = f"{sensacion_match.group(1)}°"
         elif 'temperatura' in weather_data:
-             weather_data['sensacion'] = weather_data['temperatura'] # Fallback
+             weather_data['sensacion'] = weather_data['temperatura']
     
-    # Porcentaje de Nubes (No suele estar en el JSON, buscar en texto visible "Nubes 72%")
-    # Buscar patrón: "Nubes" seguido de un número y %
-    nubes_match = re.search(r'Nubes.*?(\d+)\s*%', soup.get_text(), re.IGNORECASE)
-    if nubes_match:
-        weather_data['nubes'] = f"{nubes_match.group(1)}%"
-    elif 'nubes' not in weather_data:
-        weather_data['nubes'] = '--%'
+    # Porcentaje de Nubes
+    # Buscar "Nubes" seguido de un número y % en todo el texto limpio
+    if 'nubes' not in weather_data:
+        nubes_match = re.search(r'Nubes\s+(\d+)\s*%', full_text, re.IGNORECASE)
+        if nubes_match:
+            weather_data['nubes'] = f"{nubes_match.group(1)}%"
+        else:
+            weather_data['nubes'] = '--%'
         
-    # Arreglo descripción si sigue vacío
+    # Arreglo descripción
     if 'descripcion' not in weather_data or not weather_data['descripcion']:
-         weather_data['descripcion'] = 'Nublado' # Default seguro
+         weather_data['descripcion'] = 'Nublado'
 
     # Estado
     weather_data['esEnTiempoReal'] = True
