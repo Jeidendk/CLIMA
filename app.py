@@ -9,7 +9,7 @@ app = Flask(__name__)
 
 def parse_weather_clima_com(html_content, timezone_offset=-5):
     """
-    Parsea datos de clima.com usando data-key-values del sticky banner (más robusto)
+    Parsea datos de clima.com usando una combinación de data-key-values y scraping de texto
     """
     import json
     weather_data = {}
@@ -24,40 +24,36 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
     
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # 1. Intentar extraer del JSON en data-key-values (Método Preferido)
+    # --- ESTRATEGIA 1: Extraer del JSON en data-key-values (Rápido y estructurado) ---
     sticky_banner = soup.find('div', id='sticky-banner')
+    json_data = {}
     if sticky_banner and sticky_banner.has_attr('data-key-values'):
         try:
-            data_str = sticky_banner['data-key-values']
-            data_json = json.loads(data_str)
+            json_data = json.loads(sticky_banner['data-key-values'])
             
-            # Ubicación
-            city = data_json.get('poi_name', 'Riobamba')
-            region = data_json.get('region', 'Chimborazo')
-            weather_data['ubicacion'] = f"{city}, {region}"
+            # Ubicación: Construir desde 'urlized' si es posible para tener "Riobamba, Chimborazo"
+            # formato urlized: "ecuador/chimborazo/riobamba"
+            if 'urlized' in json_data:
+                parts = json_data['urlized'].split('/')
+                if len(parts) >= 3:
+                    city = parts[2].replace('-', ' ').title()
+                    province = parts[1].replace('-', ' ').title()
+                    weather_data['ubicacion'] = f"{city}, {province}"
             
-            # Temperatura
-            if 'temp_c' in data_json:
-                weather_data['temperatura'] = f"{data_json['temp_c']}°"
+            # Fallback ubicación simple
+            if 'ubicacion' not in weather_data:
+                city = json_data.get('poi_name', 'Riobamba')
+                region = json_data.get('region', '').replace('canton-', 'Cantón ').title()
+                weather_data['ubicacion'] = f"{city}, {region}"
+
+            # Datos Básicos del JSON
+            if 'temp_c' in json_data: weather_data['temperatura'] = f"{json_data['temp_c']}°"
+            if 'humidity' in json_data: weather_data['humedad'] = f"{json_data['humidity']}%"
+            if 'wind_speed' in json_data: weather_data['viento'] = f"{json_data['wind_speed']} km/h"
+            if 'pressure' in json_data: weather_data['presion'] = f"{json_data['pressure']} hPa"
+            if 'uv_radiation' in json_data: weather_data['radiacionUv'] = str(json_data['uv_radiation'])
             
-            # Humedad
-            if 'humidity' in data_json:
-                weather_data['humedad'] = f"{data_json['humidity']}%"
-            
-            # Viento
-            if 'wind_speed' in data_json:
-                weather_data['viento'] = f"{data_json['wind_speed']} km/h"
-                
-            # Presión
-            if 'pressure' in data_json:
-                weather_data['presion'] = f"{data_json['pressure']} hPa"
-            
-            # UV
-            if 'uv_radiation' in data_json:
-                weather_data['radiacionUv'] = str(data_json['uv_radiation'])
-                
-            # Descripción (en inglés en el JSON, ej: "cloudy")
-            # Mapeo simple
+            # Descripción (traducir)
             desc_map = {
                 'cloudy': 'Nublado',
                 'partly_cloudy': 'Parcialmente nublado',
@@ -66,62 +62,41 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
                 'rain': 'Lluvia',
                 'storm': 'Tormenta',
                 'snow': 'Nieve',
-                'fog': 'Niebla'
+                'fog': 'Niebla',
+                'despejado': 'Despejado',
+                'parcialmente nuboso': 'Parcialmente nublado',
+                'cubierto': 'Nublado'
             }
-            raw_desc = data_json.get('clouds_level', '') or data_json.get('precip_type', '')
-            weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc.capitalize())
-            
-            # Sensación - A veces no está en este JSON, intentar calcular o dejar vacío
+            raw_desc = json_data.get('clouds_level', '') or json_data.get('precip_type', '')
+            weather_data['descripcion'] = desc_map.get(raw_desc.lower(), raw_desc.capitalize())
             
         except Exception as e:
-            print(f"Error parseando data-key-values: {e}")
+            print(f"Error parseando JSON: {e}")
 
-    # 2. Fallbacks y datos extra que no estén en el JSON (ej: Sensación, Descripción visual)
+    # --- ESTRATEGIA 2: Scraping de Texto para datos faltantes (Nubes, Sensación, arreglos) ---
     
-    # Si falta ubicación
-    if 'ubicacion' not in weather_data:
-        title = soup.find('title')
-        if title:
-            title_text = title.get_text()
-            if 'Riobamba' in title_text:
-                weather_data['ubicacion'] = 'Riobamba, Chimborazo'
-    
-    # Si falta temperatura (scraping clásico como backup)
-    if 'temperatura' not in weather_data:
-        temp_pattern = re.search(r'(\d{1,2})\s*°', html_content)
-        if temp_pattern:
-            weather_data['temperatura'] = temp_pattern.group(1) + '°'
-            
-    # Sensación térmica (generalmente visible en texto)
+    # Sensación Térmica (A veces no está en el JSON)
     if 'sensacion' not in weather_data:
-        sensacion_pattern = re.search(
-            r'(?:Se\s+siente|Feels\s+like|Sensación).*?(\d{1,2})', 
-            html_content, 
-            re.IGNORECASE
-        )
-        if sensacion_pattern:
-            weather_data['sensacion'] = sensacion_pattern.group(1) + '°'
+        # Buscar texto "Sensación" seguido de números
+        sensacion_match = re.search(r'(?:Sensación|Feels like).*?(\d+)', soup.get_text(), re.IGNORECASE)
+        if sensacion_match:
+            weather_data['sensacion'] = f"{sensacion_match.group(1)}°"
         elif 'temperatura' in weather_data:
-             # Fallback: Usar temperatura como sensación si no hay dato
-             weather_data['sensacion'] = weather_data['temperatura']
+             weather_data['sensacion'] = weather_data['temperatura'] # Fallback
+    
+    # Porcentaje de Nubes (No suele estar en el JSON, buscar en texto visible "Nubes 72%")
+    # Buscar patrón: "Nubes" seguido de un número y %
+    nubes_match = re.search(r'Nubes.*?(\d+)\s*%', soup.get_text(), re.IGNORECASE)
+    if nubes_match:
+        weather_data['nubes'] = f"{nubes_match.group(1)}%"
+    elif 'nubes' not in weather_data:
+        weather_data['nubes'] = '--%'
+        
+    # Arreglo descripción si sigue vacío
+    if 'descripcion' not in weather_data or not weather_data['descripcion']:
+         weather_data['descripcion'] = 'Nublado' # Default seguro
 
-    # Descripción en español si el JSON falló o dio inglés
-    if 'descripcion' not in weather_data or weather_data['descripcion'] in ['Cloudy', 'Clear', 'none']:
-        desc_patterns = [
-            'Despejado', 'Despejada', 'Clear',
-            'Nublado', 'Cloudy', 'Nubes',
-            'Lluvia', 'Rain', 'Rainy',
-            'Llovizna', 'Drizzle',
-            'Tormenta', 'Storm', 'Thunderstorm',
-            'Parcialmente nublado', 'Partly Cloudy',
-            'Cubierto', 'Overcast'
-        ]
-        for desc in desc_patterns:
-            if desc.lower() in html_content.lower():
-                weather_data['descripcion'] = desc
-                break
-
-    # Estado del dato
+    # Estado
     weather_data['esEnTiempoReal'] = True
     weather_data['estadoDato'] = 'EN TIEMPO REAL'
     weather_data['minutosDesdeActualizacion'] = 0
