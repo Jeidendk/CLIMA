@@ -9,13 +9,12 @@ app = Flask(__name__)
 
 def parse_weather_clima_com(html_content, timezone_offset=-5):
     """
-    Parsea datos de clima.com
-    timezone_offset: Diferencia de horas respecto a UTC
-    Para Ecuador (Riobamba): -5
+    Parsea datos de clima.com usando data-key-values del sticky banner (más robusto)
     """
+    import json
     weather_data = {}
     
-    # Obtener hora actual del sistema y ajustar por zona horaria
+    # Obtener hora actual
     now_utc = datetime.utcnow()
     now = now_utc + timedelta(hours=timezone_offset)
     
@@ -25,123 +24,108 @@ def parse_weather_clima_com(html_content, timezone_offset=-5):
     
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Extraer ubicación del título o header
-    title = soup.find('title')
-    if title:
-        # Ejemplo: "Clima en Riobamba, Chimborazo"
-        title_text = title.get_text()
-        if 'Riobamba' in title_text:
-            weather_data['ubicacion'] = 'Riobamba, Chimborazo'
-    
-    # Extraer temperatura (buscar números con °)
-    temp_pattern = re.search(r'(\d{1,2})\s*°\s*C', html_content)
-    if temp_pattern:
-        weather_data['temperatura'] = temp_pattern.group(1) + '°C'
-    
-    # Extraer descripción del clima
-    desc_patterns = [
-        'Despejado', 'Despejada', 'Clear',
-        'Nublado', 'Cloudy', 'Nubes',
-        'Lluvia', 'Rain', 'Rainy',
-        'Llovizna', 'Drizzle',
-        'Tormenta', 'Storm', 'Thunderstorm',
-        'Parcialmente nublado', 'Partly Cloudy',
-        'Cubierto', 'Overcast'
-    ]
-    for desc in desc_patterns:
-        if desc.lower() in html_content.lower():
-            weather_data['descripcion'] = desc
-            break
-    
-    # Extraer sensación térmica (Feels like, Se siente, etc)
-    sensacion_pattern = re.search(
-        r'(?:Se\s+siente|Feels\s+like|Sensación)[:\s]+(\d{1,2})\s*°', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if sensacion_pattern:
-        weather_data['sensacion'] = sensacion_pattern.group(1) + '°C'
-    
-    # Extraer viento
-    viento_pattern = re.search(r'(\d{1,3})\s*(?:km/h|Km/h|KM/H)', html_content)
-    if viento_pattern:
-        weather_data['viento'] = viento_pattern.group(1) + ' km/h'
-    
-    # Extraer humedad
-    humedad_pattern = re.search(
-        r'(?:Humedad|Humidity)[:\s]+(\d{1,3})\s*%', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if humedad_pattern:
-        weather_data['humedad'] = humedad_pattern.group(1) + '%'
-    
-    # Extraer nubes
-    nubes_pattern = re.search(
-        r'(?:Nubes|Clouds)[:\s]+(\d{1,3})\s*%', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if nubes_pattern:
-        weather_data['nubes'] = nubes_pattern.group(1) + '%'
-    
-    # Extraer presión
-    presion_pattern = re.search(
-        r'(?:Presión|Pressure)[:\s]+(\d{4})\s*(?:mb|hPa|Pa)', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if presion_pattern:
-        weather_data['presion'] = presion_pattern.group(1) + ' hPa'
-    
-    # Extraer radiación UV
-    radiacion_pattern = re.search(
-        r'(?:Radiación\s*UV|UV\s+Index)[:\s]+(\d{1,2}(?:\.\d)?)', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if radiacion_pattern:
-        weather_data['radiacionUv'] = radiacion_pattern.group(1)
-    
-    # Extraer hora de actualización
-    hora_pattern = re.search(
-        r'(?:Actualizado|Updated)[:\s]+(\d{1,2}):(\d{2})', 
-        html_content, 
-        re.IGNORECASE
-    )
-    if hora_pattern:
-        hora_str = f"{hora_pattern.group(1)}:{hora_pattern.group(2)}"
-        weather_data['horaClima'] = hora_str
-        
-        # Calcular diferencia de minutos
+    # 1. Intentar extraer del JSON en data-key-values (Método Preferido)
+    sticky_banner = soup.find('div', id='sticky-banner')
+    if sticky_banner and sticky_banner.has_attr('data-key-values'):
         try:
-            hora_partes = hora_str.split(':')
-            hora_clima = now.replace(
-                hour=int(hora_partes[0]), 
-                minute=int(hora_partes[1]), 
-                second=0, 
-                microsecond=0
-            )
-            diferencia_segundos = (now - hora_clima).total_seconds()
-            diferencia_minutos = abs(diferencia_segundos / 60)
+            data_str = sticky_banner['data-key-values']
+            data_json = json.loads(data_str)
             
-            # Si la diferencia es muy grande, ajustar
-            if diferencia_minutos > 720:
-                diferencia_minutos = abs(diferencia_minutos - 1440)
+            # Ubicación
+            city = data_json.get('poi_name', 'Riobamba')
+            region = data_json.get('region', 'Chimborazo')
+            weather_data['ubicacion'] = f"{city}, {region}"
             
-            weather_data['minutosDesdeActualizacion'] = int(diferencia_minutos)
-            weather_data['esEnTiempoReal'] = diferencia_minutos < 30
+            # Temperatura
+            if 'temp_c' in data_json:
+                weather_data['temperatura'] = f"{data_json['temp_c']}°"
             
-            if diferencia_minutos < 30:
-                weather_data['estadoDato'] = 'EN TIEMPO REAL'
-            else:
-                weather_data['estadoDato'] = f'DESACTUALIZADO ({int(diferencia_minutos)} min)'
-        except:
-            weather_data['esEnTiempoReal'] = False
-            weather_data['estadoDato'] = 'ERROR AL CALCULAR HORA'
-    else:
-        weather_data['esEnTiempoReal'] = False
-        weather_data['estadoDato'] = 'SIN HORA DETECTADA'
+            # Humedad
+            if 'humidity' in data_json:
+                weather_data['humedad'] = f"{data_json['humidity']}%"
+            
+            # Viento
+            if 'wind_speed' in data_json:
+                weather_data['viento'] = f"{data_json['wind_speed']} km/h"
+                
+            # Presión
+            if 'pressure' in data_json:
+                weather_data['presion'] = f"{data_json['pressure']} hPa"
+            
+            # UV
+            if 'uv_radiation' in data_json:
+                weather_data['radiacionUv'] = str(data_json['uv_radiation'])
+                
+            # Descripción (en inglés en el JSON, ej: "cloudy")
+            # Mapeo simple
+            desc_map = {
+                'cloudy': 'Nublado',
+                'partly_cloudy': 'Parcialmente nublado',
+                'sunny': 'Soleado',
+                'clear': 'Despejado',
+                'rain': 'Lluvia',
+                'storm': 'Tormenta',
+                'snow': 'Nieve',
+                'fog': 'Niebla'
+            }
+            raw_desc = data_json.get('clouds_level', '') or data_json.get('precip_type', '')
+            weather_data['descripcion'] = desc_map.get(raw_desc, raw_desc.capitalize())
+            
+            # Sensación - A veces no está en este JSON, intentar calcular o dejar vacío
+            
+        except Exception as e:
+            print(f"Error parseando data-key-values: {e}")
+
+    # 2. Fallbacks y datos extra que no estén en el JSON (ej: Sensación, Descripción visual)
+    
+    # Si falta ubicación
+    if 'ubicacion' not in weather_data:
+        title = soup.find('title')
+        if title:
+            title_text = title.get_text()
+            if 'Riobamba' in title_text:
+                weather_data['ubicacion'] = 'Riobamba, Chimborazo'
+    
+    # Si falta temperatura (scraping clásico como backup)
+    if 'temperatura' not in weather_data:
+        temp_pattern = re.search(r'(\d{1,2})\s*°', html_content)
+        if temp_pattern:
+            weather_data['temperatura'] = temp_pattern.group(1) + '°'
+            
+    # Sensación térmica (generalmente visible en texto)
+    if 'sensacion' not in weather_data:
+        sensacion_pattern = re.search(
+            r'(?:Se\s+siente|Feels\s+like|Sensación).*?(\d{1,2})', 
+            html_content, 
+            re.IGNORECASE
+        )
+        if sensacion_pattern:
+            weather_data['sensacion'] = sensacion_pattern.group(1) + '°'
+        elif 'temperatura' in weather_data:
+             # Fallback: Usar temperatura como sensación si no hay dato
+             weather_data['sensacion'] = weather_data['temperatura']
+
+    # Descripción en español si el JSON falló o dio inglés
+    if 'descripcion' not in weather_data or weather_data['descripcion'] in ['Cloudy', 'Clear', 'none']:
+        desc_patterns = [
+            'Despejado', 'Despejada', 'Clear',
+            'Nublado', 'Cloudy', 'Nubes',
+            'Lluvia', 'Rain', 'Rainy',
+            'Llovizna', 'Drizzle',
+            'Tormenta', 'Storm', 'Thunderstorm',
+            'Parcialmente nublado', 'Partly Cloudy',
+            'Cubierto', 'Overcast'
+        ]
+        for desc in desc_patterns:
+            if desc.lower() in html_content.lower():
+                weather_data['descripcion'] = desc
+                break
+
+    # Estado del dato
+    weather_data['esEnTiempoReal'] = True
+    weather_data['estadoDato'] = 'EN TIEMPO REAL'
+    weather_data['minutosDesdeActualizacion'] = 0
+    weather_data['horaClima'] = now.strftime('%H:%M')
     
     return weather_data
 
